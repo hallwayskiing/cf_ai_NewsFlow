@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Tech News</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --accent: #38bdf8;
+            --border: #334155;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+
+        header {
+            background-color: var(--card-bg);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 2rem;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            background: linear-gradient(to right, #38bdf8, #818cf8);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        .section-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--text-secondary);
+            border-left: 4px solid var(--accent);
+            padding-left: 0.75rem;
+        }
+
+        /* Top Section: Today */
+        .today-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+        }
+
+        /* Bottom Section: Split */
+        .history-split {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+
+        @media (max-width: 768px) {
+            .history-split {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .news-card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .news-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            border-color: var(--accent);
+        }
+
+        .news-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin: 0;
+            line-height: 1.4;
+        }
+
+        .news-title a {
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .news-title a:hover {
+            color: var(--accent);
+        }
+
+        .news-summary {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            flex-grow: 1;
+        }
+
+        .news-meta {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-secondary);
+        }
+
+        .error {
+            color: #ef4444;
+            text-align: center;
+            padding: 2rem;
+        }
+
+        .last-updated {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-left: 1rem;
+            font-weight: normal;
+        }
+
+        .more-news {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(56, 189, 248, 0.1);
+            border: 1px dashed var(--accent);
+            color: var(--accent);
+            font-weight: 500;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>AI Tech News Flow</h1>
+    </header>
+
+    <div class="container" id="app">
+        <div class="loading">Loading news...</div>
+    </div>
+
+    <script>
+        async function fetchNews() {
+            try {
+                const response = await fetch('/api/news');
+                if (!response.ok) throw new Error('Failed to fetch news');
+                const data = await response.json();
+                render(data);
+            } catch (err) {
+                document.getElementById('app').innerHTML = `<div class="error">${err.message}</div>`;
+            }
+        }
+
+        function createCard(item) {
+            return `
+                <article class="news-card">
+                    <h2 class="news-title">
+                        <a href="${item.url}" target="_blank" rel="noopener noreferrer">${item.title}</a>
+                    </h2>
+                    <p class="news-summary">${item.summary}</p>
+                    <div class="news-meta">
+                        <span>Score: ${item.score || 0}</span>
+                    </div>
+                </article>
+            `;
+        }
+
+        function render(data) {
+            const container = document.getElementById('app');
+            const dates = Object.keys(data).sort().reverse();
+
+            if (dates.length === 0) {
+                container.innerHTML = '<div class="loading">Initializing news data... Please refresh in a few seconds.</div>';
+                return;
+            }
+
+            const today = dates[0];
+            const yesterday = dates[1];
+            const dayBefore = dates[2];
+
+            let html = '';
+
+            // Helper to render a section
+            const renderSection = (date, isFullWidth = false, showLastUpdated = false) => {
+                const dayInfo = data[date];
+                if (!dayInfo) return '';
+
+                // Handle new data structure where dayInfo = { items: [], lastUpdated: '...' }
+                // Fallback for backward compatibility if needed, but assuming new structure
+                const items = dayInfo.items || [];
+                const lastUpdated = dayInfo.lastUpdated ? new Date(dayInfo.lastUpdated).toLocaleTimeString() : '';
+
+                let cardsHtml = items.map(createCard).join('');
+
+                // "More News Coming" if < 5
+                if (items.length < 5) {
+                    cardsHtml += `
+                        <article class="news-card more-news">
+                            More News Coming...
+                        </article>
+                    `;
+                }
+
+                const updatedHtml = (showLastUpdated && lastUpdated) ? `<span class="last-updated">Last update: ${lastUpdated}</span>` : '';
+
+                return `
+                    <section>
+                        <div class="section-title">
+                            ${date}
+                            ${updatedHtml}
+                        </div>
+                        <div class="today-grid" ${isFullWidth ? '' : 'style="grid-template-columns: 1fr;"'}>
+                            ${cardsHtml}
+                        </div>
+                    </section>
+                `;
+            };
+
+            // Today
+            if (today) {
+                html += renderSection(today, true, true);
+            }
+
+            // History Split
+            if (yesterday || dayBefore) {
+                html += '<div class="history-split">';
+                if (yesterday) html += renderSection(yesterday, false, false);
+                if (dayBefore) html += renderSection(dayBefore, false, false);
+                html += '</div>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        fetchNews();
+    </script>
+</body>
+
+</html>
