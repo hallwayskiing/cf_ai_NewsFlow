@@ -1,111 +1,213 @@
 import {
-	WorkflowEntrypoint,
-	WorkflowEvent,
-	WorkflowStep,
-} from "cloudflare:workers";
+  WorkflowEntrypoint,
+  WorkflowStep,
+  WorkflowEvent,
+} from 'cloudflare:workers';
 
-/**
- * Welcome to Cloudflare Workers! This is your first Workflows application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Workflow in action
- * - Run `npm run deploy` to publish your application
- *
- * Learn more at https://developers.cloudflare.com/workflows
- */
- 
-// User-defined params passed to your Workflow
-type Params = {
-	email: string;
-	metadata: Record<string, string>;
-};
-
-export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
-	async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
-		// Can access bindings on `this.env`
-		// Can access params on `event.payload`
-
-		const files = await step.do("my first step", async () => {
-			// Fetch a list of files from $SOME_SERVICE
-			return {
-				inputParams: event,
-				files: [
-					"doc_7392_rev3.pdf",
-					"report_x29_final.pdf",
-					"memo_2024_05_12.pdf",
-					"file_089_update.pdf",
-					"proj_alpha_v2.pdf",
-					"data_analysis_q2.pdf",
-					"notes_meeting_52.pdf",
-					"summary_fy24_draft.pdf",
-				],
-			};
-		});
-
-		// You can optionally have a Workflow wait for additional data,
-		// human approval or an external webhook or HTTP request, before progressing.
-		// You can submit data via HTTP POST to /accounts/{account_id}/workflows/{workflow_name}/instances/{instance_id}/events/{eventName}
-		const waitForApproval = await step.waitForEvent("request-approval", {
-			type: "approval", // define an optional key to switch on
-			timeout: "1 minute", // keep it short for the example!
-		});
-
-		const apiResponse = await step.do("some other step", async () => {
-			let resp = await fetch("https://api.cloudflare.com/client/v4/ips");
-			return await resp.json<any>();
-		});
-
-		await step.sleep("wait on something", "1 minute");
-
-		await step.do(
-			"make a call to write that could maybe, just might, fail",
-			// Define a retry strategy
-			{
-				retries: {
-					limit: 5,
-					delay: "5 second",
-					backoff: "exponential",
-				},
-				timeout: "15 minutes",
-			},
-			async () => {
-				// Do stuff here, with access to the state from our previous steps
-				if (Math.random() > 0.5) {
-					throw new Error("API call to $STORAGE_SYSTEM failed");
-				}
-			},
-		);
-	}
+// =====================
+// Env bindings
+// =====================
+interface Env {
+  AI: Ai;
+  VECTORIZE: VectorizeIndex;
+  MY_WORKFLOW: Workflow;
+  NEWS_KV: KVNamespace;
 }
+
+// =====================
+// Types
+// =====================
+interface NewsItem {
+  id: number;
+  title: string;
+  url: string;
+  score?: number;
+  time?: number;
+}
+
+interface ProcessedNewsItem extends NewsItem {
+  summary: string;
+}
+
+interface NewsDayDataValue {
+  items: ProcessedNewsItem[];
+  lastUpdated: string;
+}
+
+interface NewsDayData {
+  [date: string]: NewsDayDataValue;
+}
+
+interface WorkflowParams {
+  date: string; // YYYY-MM-DD
+  backfill?: boolean;
+}
+
+// =====================
+// Helpers
+// =====================
+function formatDate(d: Date): string {
+  return d.toISOString().split('T')[0];
+}
+
+function getPastDates(count: number): string[] {
+  const dates = [];
+  for (let i = 0; i < count; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    dates.push(formatDate(d));
+  }
+  return dates;
+}
+
+// =====================
+// Workflow
+// =====================
+export class NewsWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
+  async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
+    const targetDate = event.payload.date || formatDate(new Date());
+
+    // 1️⃣ Fetch raw news for the date
+    const rawNews = await step.do('fetch-algolia', async (): Promise<NewsItem[]> => {
+      // Algolia timestamp range for the target date (UTC)
+      const start = new Date(targetDate);
+      start.setUTCHours(0, 0, 0, 0);
+      const end = new Date(targetDate);
+      end.setUTCHours(23, 59, 59, 999);
+
+      const startTs = Math.floor(start.getTime() / 1000);
+      const endTs = Math.floor(end.getTime() / 1000);
+
+      // Query: "tech" related stories
+      // We fetch more items (50) to ensure we find 5 good ones after filtering and sorting by score
+      const query = `https://hn.algolia.com/api/v1/search?query=tech&tags=story&numericFilters=created_at_i>=${startTs},created_at_i<=${endTs}&hitsPerPage=50`;
+
+      const res = await fetch(query);
+      const data: any = await res.json();
+
+      // Map to NewsItem, filter, sort by score, and take top 5
+      return data.hits
+        .filter((h: any) => h.url) // Must have URL
+        .map((h: any) => ({
+          id: h.objectID,
+          title: h.title,
+          url: h.url,
+          score: h.points || 0,
+          time: h.created_at_i
+        }))
+        .sort((a: NewsItem, b: NewsItem) => (b.score || 0) - (a.score || 0)) // Sort by score desc
+        .slice(0, 5); // Take top 5
+    });
+
+    // 2️⃣ Summarize with AI
+    const processedNews = await step.do('summarize-news', async (): Promise<ProcessedNewsItem[]> => {
+      const results: ProcessedNewsItem[] = [];
+
+      for (const item of rawNews) {
+        const messages = [
+          {
+            role: 'system' as const,
+            content: 'You are a tech news summarizer. Summarize the following news title and context into one concise sentence.'
+          },
+          {
+            role: 'user' as const,
+            content: `Title: ${item.title}`
+          }
+        ];
+
+        let summary = 'No summary available';
+        try {
+          const aiRes: any = await this.env.AI.run(
+            '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any,
+            { messages }
+          );
+          summary = aiRes.response || summary;
+        } catch (e) {
+          console.error(`AI summary failed for ${item.id}`, e);
+        }
+
+        results.push({ ...item, summary });
+      }
+      return results;
+    });
+
+    // 3️⃣ Store in KV
+    await step.do('save-to-kv', async () => {
+      const data: NewsDayDataValue = {
+        items: processedNews,
+        lastUpdated: new Date().toISOString()
+      };
+      await this.env.NEWS_KV.put(`news:${targetDate}`, JSON.stringify(data));
+    });
+
+    return { status: 'success', date: targetDate, count: processedNews.length };
+  }
+}
+
+// =====================
+// HTTP Entrypoint
+// =====================
 export default {
-	async fetch(req: Request, env: Env): Promise<Response> {
-		let url = new URL(req.url);
+  async fetch(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
 
-		if (url.pathname.startsWith("/favicon")) {
-			return Response.json({}, { status: 404 });
-		}
+    // API: Get News
+    if (url.pathname === '/api/news') {
+      const dates = getPastDates(3); // Today, Yesterday, DayBefore
+      const data: NewsDayData = {};
+      const missingDates: string[] = [];
 
-		// Get the status of an existing instance, if provided
-		// GET /?instanceId=<id here>
-		let id = url.searchParams.get("instanceId");
-		if (id) {
-			let instance = await env.MY_WORKFLOW.get(id);
-			return Response.json({
-				status: await instance.status(),
-			});
-		}
+      for (const date of dates) {
+        const dayData = await env.NEWS_KV.get(`news:${date}`);
+        if (dayData) {
+          data[date] = JSON.parse(dayData);
+        } else {
+          missingDates.push(date);
+        }
+      }
 
-		// Spawn a new instance and return the ID and status
-		let instance = await env.MY_WORKFLOW.create();
-		// You can also set the ID to match an ID in your own system
-		// and pass an optional payload to the Workflow
-		// let instance = await env.MY_WORKFLOW.create({
-		// 	id: 'id-from-your-system',
-		// 	params: { payload: 'to send' },
-		// });
-		return Response.json({
-			id: instance.id,
-			details: await instance.status(),
-		});
-	},
+      // Auto-fill (Trigger Backfill) if missing any data
+      if (missingDates.length > 0) {
+        console.log(`Missing data for ${missingDates.join(', ')}, triggering backfill`);
+        for (const date of missingDates) {
+          // Fire and forget workflow
+          await env.MY_WORKFLOW.create({ params: { date, backfill: true } });
+        }
+      }
+
+      return Response.json(data);
+    }
+
+    // Fallback for API 404
+    return new Response('Not Found', { status: 404 });
+  },
+
+  // Crons
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    // 1. Run hourly update for "today"
+    const now = new Date(event.scheduledTime);
+    const today = formatDate(now);
+
+    // Trigger workflow for today's news
+    const instance = await env.MY_WORKFLOW.create({ params: { date: today } });
+    console.log(`Scheduled workflow started: ${instance.id} for ${today}`);
+
+    // 2. Daily Cleanup
+    ctx.waitUntil((async () => {
+      const allowedDates = new Set(getPastDates(3)); // [Today, Yesterday, DayBefore]
+
+      const list = await env.NEWS_KV.list({ prefix: 'news:' });
+
+      for (const key of list.keys) {
+        // key format: news:YYYY-MM-DD
+        const datePart = key.name.split(':')[1];
+
+        // If the date is NOT in our allowed 3 days, delete it.
+        if (!allowedDates.has(datePart)) {
+          await env.NEWS_KV.delete(key.name);
+          console.log(`Deleted old news: ${key.name}`);
+        }
+      }
+    })());
+  }
 };
