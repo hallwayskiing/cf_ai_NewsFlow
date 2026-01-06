@@ -46,16 +46,20 @@ interface WorkflowParams {
 // =====================
 // Helpers
 // =====================
-function formatDate(d: Date): string {
-  return d.toISOString().split('T')[0];
+function formatDateEST(d: Date): string {
+  const estDate = new Date(d.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  return estDate.toISOString().split('T')[0];
 }
 
-function getPastDates(count: number): string[] {
+function getPastDatesEST(count: number): string[] {
   const dates = [];
+  const now = new Date();
+  const estNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+
   for (let i = 0; i < count; i++) {
-    const d = new Date();
+    const d = new Date(estNow);
     d.setDate(d.getDate() - i);
-    dates.push(formatDate(d));
+    dates.push(formatDateEST(d));
   }
   return dates;
 }
@@ -65,18 +69,16 @@ function getPastDates(count: number): string[] {
 // =====================
 export class NewsWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
   async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
-    const targetDate = event.payload.date || formatDate(new Date());
+    const targetDate = event.payload.date || formatDateEST(new Date());
 
     // 1️⃣ Fetch raw news for the date
     const rawNews = await step.do('fetch-algolia', async (): Promise<NewsItem[]> => {
       // Algolia timestamp range for the target date (UTC)
-      const start = new Date(targetDate);
-      start.setUTCHours(0, 0, 0, 0);
-      const end = new Date(targetDate);
-      end.setUTCHours(23, 59, 59, 999);
+      const start = new Date(targetDate + 'T00:00:00');
+      const end = new Date(targetDate + 'T23:59:59');
 
-      const startTs = Math.floor(start.getTime() / 1000);
-      const endTs = Math.floor(end.getTime() / 1000);
+      const startTs = Math.floor(new Date(start.toLocaleString('en-US', { timeZone: 'America/New_York' })).getTime() / 1000);
+      const endTs = Math.floor(new Date(end.toLocaleString('en-US', { timeZone: 'America/New_York' })).getTime() / 1000);
 
       // Query: "tech" related stories
       // We fetch more items (50) to ensure we find 5 good ones after filtering and sorting by score
@@ -153,7 +155,7 @@ export default {
 
     // API: Get News
     if (url.pathname === '/api/news') {
-      const dates = getPastDates(3); // Today, Yesterday, DayBefore
+      const dates = getPastDatesEST(3); // Today, Yesterday, DayBefore
       const data: NewsDayData = {};
       const missingDates: string[] = [];
 
@@ -186,7 +188,7 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     // 1. Run hourly update for "today"
     const now = new Date(event.scheduledTime);
-    const today = formatDate(now);
+    const today = formatDateEST(now);
 
     // Trigger workflow for today's news
     const instance = await env.MY_WORKFLOW.create({ params: { date: today } });
@@ -194,7 +196,7 @@ export default {
 
     // 2. Daily Cleanup
     ctx.waitUntil((async () => {
-      const allowedDates = new Set(getPastDates(3)); // [Today, Yesterday, DayBefore]
+      const allowedDates = new Set(getPastDatesEST(3)); // [Today, Yesterday, DayBefore]
 
       const list = await env.NEWS_KV.list({ prefix: 'news:' });
 
