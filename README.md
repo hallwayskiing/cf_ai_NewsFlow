@@ -4,7 +4,7 @@ NewsFlow AI is a serverless application built on Cloudflare Workers that aggrega
 
 ## Features
 
--   **Automated Aggregation**: Fetches top trending tech stories from HackerNews (via Algolia).
+-   **Automated Aggregation**: Fetches top trending tech stories from HackerNews (via Algolia), then retrieves main content through URL smartly.
 -   **AI Summarization**: Uses Cloudflare Workers AI to generate concise one-sentence summaries for each story.
 -   **Daily Digest**: Organizes news by day (today, yesterday, day before).
 -   **Self-Updating**: Runs hourly via Cron Triggers to fetch fresh news.

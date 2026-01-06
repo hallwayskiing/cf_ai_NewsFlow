@@ -3,6 +3,7 @@ import {
   WorkflowStep,
   WorkflowEvent,
 } from 'cloudflare:workers';
+import { parseHTML } from 'linkedom';
 
 // =====================
 // Env bindings
@@ -46,22 +47,87 @@ interface WorkflowParams {
 // =====================
 // Helpers
 // =====================
-function formatDateEST(d: Date): string {
-  const estDate = new Date(d.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  return estDate.toISOString().split('T')[0];
+function formatDateEST(d: Date = new Date()): string {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+
+  return formatter.format(d);
 }
 
 function getPastDatesEST(count: number): string[] {
   const dates = [];
   const now = new Date();
-  const estNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const todayStr = formatDateEST(now);
+  // Create a UTC date at noon for the current EST date to safely perform date arithmetic
+  const current = new Date(`${todayStr}T12:00:00Z`);
 
   for (let i = 0; i < count; i++) {
-    const d = new Date(estNow);
-    d.setDate(d.getDate() - i);
-    dates.push(formatDateEST(d));
+    const d = new Date(current);
+    d.setUTCDate(d.getUTCDate() - i);
+    dates.push(d.toISOString().split('T')[0]);
   }
   return dates;
+}
+
+async function fetchNewsContent(url: string) {
+  const selectors = [
+    "article",
+    "[role='main']",
+    "main",
+    ".post-content",
+    ".article-body",
+    "#content",
+    "#main",
+    ".main-content",
+    ".entry-content",
+    "body" // fallback
+  ];
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      },
+      signal: AbortSignal.timeout(8000)
+    });
+
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const html = await response.text();
+    const { document } = parseHTML(html);
+
+    // 1. Clean up noise
+    const noise = document.querySelectorAll('script, style, noscript, iframe, nav, footer, header, .ads, .sidebar');
+    noise.forEach((el: any) => el.remove());
+
+    // 2. Cascade matching
+    let extractedText = "";
+
+    for (const selector of selectors) {
+      const element = document.querySelector(selector);
+      if (element) {
+        const text = element.textContent?.replace(/\s+/g, ' ').trim();
+
+        // Succeed only when text length > 100
+        if (text && text.length > 100) {
+          extractedText = text;
+          console.log(`Matched by selector: ${selector}`);
+          break;
+        }
+      }
+    }
+
+    // 3. Truncate
+    return extractedText.substring(0, 500) || "Could not extract meaningful content.";
+
+  } catch (error) {
+    console.error(`Fetch error for ${url}:`, error);
+    return "";
+  }
 }
 
 // =====================
@@ -103,34 +169,35 @@ export class NewsWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
     // 2️⃣ Summarize with AI
     const processedNews = await step.do('summarize-news', async (): Promise<ProcessedNewsItem[]> => {
-      const results: ProcessedNewsItem[] = [];
-
-      for (const item of rawNews) {
-        const messages = [
-          {
-            role: 'system' as const,
-            content: 'You are a tech news summarizer. Summarize the following news title and context into one concise sentence.'
-          },
-          {
-            role: 'user' as const,
-            content: `Title: ${item.title}`
-          }
-        ];
-
-        let summary = 'No summary available';
+      const tasks = rawNews.map(async (item) => {
         try {
+          const content = await fetchNewsContent(item.url);
+          const messages = [
+            {
+              role: 'system',
+              content: 'You are a tech news summarizer. Summarize the following news title and content into one concise sentence.'
+            },
+            {
+              role: 'user',
+              content: `Title: ${item.title}\nContent: ${content || 'No content available'}`
+            }
+          ];
+
           const aiRes: any = await this.env.AI.run(
             '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any,
             { messages }
           );
-          summary = aiRes.response || summary;
-        } catch (e) {
-          console.error(`AI summary failed for ${item.id}`, e);
-        }
 
-        results.push({ ...item, summary });
-      }
-      return results;
+          return {
+            ...item,
+            summary: aiRes.response || 'No summary available'
+          };
+        } catch (e) {
+          console.error(`Processing failed for ${item.id}:`, e);
+          return { ...item, summary: 'Summary failed due to error' };
+        }
+      });
+      return await Promise.all(tasks);
     });
 
     // 3️⃣ Store in KV
